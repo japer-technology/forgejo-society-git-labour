@@ -2,6 +2,9 @@
 
 Go library and CLI for working with git forges. Supports GitHub, GitLab, Gitea/Forgejo, and Bitbucket Cloud through a single interface.
 
+> [!WARNING]
+> This is pre-alpha. It is not yet conformant or safe for real execution.
+
 ## CLI
 
 ```
