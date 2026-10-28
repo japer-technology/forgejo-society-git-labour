@@ -33,16 +33,9 @@ var apiCmd = &cobra.Command{
 		endpoint = strings.ReplaceAll(endpoint, "{repo}", repoName)
 
 		// Build full URL
-		var baseURL string
-		switch {
-		case strings.Contains(domain, "github"):
-			baseURL = "https://api." + domain
-		case strings.Contains(domain, "gitlab"):
-			baseURL = "https://" + domain + "/api/v4"
-		case strings.Contains(domain, "bitbucket"):
-			baseURL = "https://api.bitbucket.org/2.0"
-		default:
-			baseURL = "https://" + domain + "/api/v1"
+		baseURL, err := resolve.APIBaseURL(cmd.Context(), domain)
+		if err != nil {
+			return err
 		}
 
 		url := baseURL + "/" + strings.TrimLeft(endpoint, "/")

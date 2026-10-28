@@ -111,18 +111,26 @@ func (c *Client) RegisterDomain(ctx context.Context, domain, token string, build
 	if err != nil {
 		return fmt.Errorf("detecting forge type for %s: %w", domain, err)
 	}
-	c.tokens[domain] = token
-	baseURL := "https://" + domain
+	var builder func(string, string, *http.Client) Forge
 	switch ft {
 	case GitHub:
-		c.forges[domain] = builders.GitHub(baseURL, token, c.httpClient)
+		builder = builders.GitHub
 	case GitLab:
-		c.forges[domain] = builders.GitLab(baseURL, token, c.httpClient)
+		builder = builders.GitLab
 	case Gitea, Forgejo:
-		c.forges[domain] = builders.Gitea(baseURL, token, c.httpClient)
+		builder = builders.Gitea
 	default:
 		return fmt.Errorf("unsupported forge type %q for %s", ft, domain)
 	}
+	if builder == nil {
+		return fmt.Errorf("no builder for forge type %q at %s", ft, domain)
+	}
+	f := builder("https://"+domain, token, c.httpClient)
+	if f == nil {
+		return fmt.Errorf("builder for forge type %q at %s returned nil", ft, domain)
+	}
+	c.tokens[domain] = token
+	c.forges[domain] = f
 	return nil
 }
 
@@ -233,7 +241,7 @@ func (c *Client) FetchTagsFromPURL(ctx context.Context, p *purl.PURL) ([]Tag, er
 
 // ParseRepoURL extracts the domain, owner, and repo from a repository URL.
 // It handles https://, schemeless, and git@host:owner/repo SSH URLs, and
-// strips .git suffixes and extra path segments.
+// strips .git suffixes while preserving nested owner namespaces.
 func ParseRepoURL(rawURL string) (domain, owner, repo string, err error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
@@ -262,17 +270,28 @@ func ParseRepoURL(rawURL string) (domain, owner, repo string, err error) {
 		return "", "", "", fmt.Errorf("invalid URL: %w", err)
 	}
 	domain = u.Hostname()
+	if u.Scheme == "https" || u.Scheme == "http" {
+		domain = u.Host
+	}
 	return splitOwnerRepo(domain, u.Path)
 }
 
 const minOwnerRepoParts = 2
 
 func splitOwnerRepo(domain, path string) (string, string, string, error) {
-	path = strings.TrimSuffix(path, ".git")
 	path = strings.Trim(path, "/")
+	path = strings.TrimSuffix(path, ".git")
 	parts := strings.Split(path, "/")
+	if domain == "" {
+		return "", "", "", fmt.Errorf("URL must contain a host")
+	}
 	if len(parts) < minOwnerRepoParts {
 		return "", "", "", fmt.Errorf("URL path must contain owner/repo, got %q", path)
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", "", "", fmt.Errorf("invalid repository path %q", path)
+		}
 	}
 	owner := strings.Join(parts[:len(parts)-1], "/")
 	repo := parts[len(parts)-1]

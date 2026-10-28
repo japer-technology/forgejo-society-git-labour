@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,87 @@ import (
 	forge "github.com/git-pkgs/forge"
 	"github.com/google/go-github/v82/github"
 )
+
+func TestGitHubListMergedPRsFiltersBeforeLimit(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != "closed" {
+			t.Errorf("expected API state=closed, got %s", r.URL.RawQuery)
+		}
+		if r.URL.Query().Get("page") == "1" {
+			w.Header().Set("Link", fmt.Sprintf(`<%s/api/v3/repos/owner/repo/pulls?page=2&state=closed>; rel="next"`, srv.URL))
+			_, _ = w.Write([]byte(`[{"number":1,"state":"closed","merged_at":null}]`))
+		} else {
+			_, _ = w.Write([]byte(`[{"number":2,"state":"closed","merged_at":"2026-01-01T00:00:00Z"}]`))
+		}
+	}))
+	defer srv.Close()
+	prs, err := newTestGitHubPRService(srv).List(context.Background(), "owner", "repo", forge.ListPROpts{State: "merged", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 1 || prs[0].Number != 2 || !prs[0].Merged || prs[0].State != "merged" {
+		t.Fatalf("expected only merged PR 2, got %+v", prs)
+	}
+}
+
+func TestGitHubMergeBranchDeletionSafety(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		getStatus  int
+		head       string
+		merged     bool
+		wantMerge  bool
+		wantDelete bool
+		wantErr    bool
+	}{
+		{
+			name: "fork branch", getStatus: http.StatusOK, merged: true,
+			head:      `{"ref":"feature","repo":{"name":"fork","owner":{"login":"contributor"},"default_branch":"main"}}`,
+			wantMerge: true, wantDelete: true,
+		},
+		{
+			name: "merge refused", getStatus: http.StatusOK,
+			head:      `{"ref":"feature","repo":{"name":"fork","owner":{"login":"contributor"}}}`,
+			wantMerge: true, wantErr: true,
+		},
+		{name: "fetch failed", getStatus: http.StatusForbidden, wantErr: true},
+		{name: "missing source", getStatus: http.StatusOK, head: `null`, wantErr: true},
+		{
+			name: "default branch", getStatus: http.StatusOK,
+			head:    `{"ref":"main","repo":{"name":"fork","owner":{"login":"contributor"},"default_branch":"main"}}`,
+			wantErr: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var mergeCalled, deleteCalled bool
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /api/v3/repos/owner/repo/pulls/1", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.getStatus)
+				if tt.getStatus == http.StatusOK {
+					_, _ = fmt.Fprintf(w, `{"number":1,"head":%s}`, tt.head)
+				}
+			})
+			mux.HandleFunc("PUT /api/v3/repos/owner/repo/pulls/1/merge", func(w http.ResponseWriter, r *http.Request) {
+				mergeCalled = true
+				_, _ = fmt.Fprintf(w, `{"merged":%t,"message":"merge result"}`, tt.merged)
+			})
+			mux.HandleFunc("DELETE /api/v3/repos/contributor/fork/git/refs/heads/feature", func(w http.ResponseWriter, r *http.Request) {
+				deleteCalled = true
+				w.WriteHeader(http.StatusNoContent)
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			err := newTestGitHubPRService(srv).Merge(context.Background(), "owner", "repo", 1, forge.MergePROpts{Delete: true})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr = %t", err, tt.wantErr)
+			}
+			if mergeCalled != tt.wantMerge || deleteCalled != tt.wantDelete {
+				t.Fatalf("merge called = %t, deletion called = %t", mergeCalled, deleteCalled)
+			}
+		})
+	}
+}
 
 func newTestGitHubPRService(srv *httptest.Server) *gitHubPRService {
 	c := github.NewClient(nil)
@@ -356,8 +438,13 @@ func TestGitHubMergePRDeletesBranch(t *testing.T) {
 			Title:  ptr("Fix bug"),
 			State:  ptr("open"),
 			User:   &github.User{Login: ptr("octocat")},
-			Head:   &github.PullRequestBranch{Ref: ptr("feature-branch")},
-			Base:   &github.PullRequestBranch{Ref: ptr("main")},
+			Head: &github.PullRequestBranch{
+				Ref: ptr("feature-branch"),
+				Repo: &github.Repository{
+					Name: ptr("hello-world"), Owner: &github.User{Login: ptr("octocat")},
+				},
+			},
+			Base: &github.PullRequestBranch{Ref: ptr("main")},
 		})
 	})
 	mux.HandleFunc("PUT /api/v3/repos/octocat/hello-world/pulls/1/merge", func(w http.ResponseWriter, r *http.Request) {

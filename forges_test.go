@@ -47,6 +47,18 @@ func TestParseRepoURL(t *testing.T) {
 			domain: "github.com", owner: "octocat", repo: "hello-world",
 		},
 		{
+			input:  "https://forge.example:8443/group/repo.git/",
+			domain: "forge.example:8443", owner: "group", repo: "repo",
+		},
+		{
+			input:  "ssh://git@forge.example:2222/group/repo.git",
+			domain: "forge.example", owner: "group", repo: "repo",
+		},
+		{input: "https:///owner/repo", wantErr: true},
+		{input: "git@:owner/repo", wantErr: true},
+		{input: "https://example.com/owner//repo", wantErr: true},
+		{input: "https://example.com/owner/.git", wantErr: true},
+		{
 			input:  "https://gitlab.com/group/project/tree/main",
 			domain: "gitlab.com", owner: "group/project/tree", repo: "main",
 		},

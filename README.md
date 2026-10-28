@@ -37,6 +37,18 @@ forge api repos/{owner}/{repo}
 
 Run `forge --help` for the full command list.
 
+`--host` and `FORGE_HOST` override the API host even when the owner and repository
+are inferred from a git remote. `forge api` uses the selected forge type (from
+`--forge-type`, host configuration, or detection), including `/api/v3` for GitHub
+Enterprise; it does not infer the API path from words in the hostname.
+
+`forge pr list --state merged` filters merged pull requests before applying the
+result limit. On Bitbucket, `--state all` includes open, merged, declined, and
+superseded pull requests. For GitHub, `forge pr merge --delete-branch` deletes the
+branch in its source repository, including forks, only after a confirmed merge.
+It refuses deletion when the source cannot be identified or is its repository's
+default branch; deleting a fork branch requires write access to that fork.
+
 ### Authentication
 
 Store tokens with `forge auth login`:
@@ -90,13 +102,21 @@ import "github.com/git-pkgs/forge"
 ```
 
 ```go
+import (
+    "github.com/git-pkgs/forge/github"
+    "github.com/git-pkgs/forge/gitlab"
+)
+
 client := forges.NewClient(
-    forges.WithToken("github.com", os.Getenv("GITHUB_TOKEN")),
-    forges.WithToken("gitlab.com", os.Getenv("GITLAB_TOKEN")),
+    forges.WithForge("github.com", github.New(os.Getenv("GITHUB_TOKEN"), nil)),
+    forges.WithForge("gitlab.com", gitlab.New("https://gitlab.com", os.Getenv("GITLAB_TOKEN"), nil)),
 )
 
 repo, err := client.FetchRepository(ctx, "https://github.com/octocat/hello-world")
 ```
+
+Register backends with `WithForge`; `WithToken` alone stores a token but does not
+create a backend.
 
 The `Forge` interface exposes services for repos, issues, pull requests, reviews, releases, CI, branches, labels, milestones, deploy keys, secrets, notifications, files, collaborators, and commit statuses. Each backend implements these using its native SDK.
 
