@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	forge "github.com/git-pkgs/forge"
@@ -143,20 +144,22 @@ func (s *bitbucketPRService) List(ctx context.Context, owner, repo string, opts 
 		perPage = 30
 	}
 
-	state := "OPEN"
+	states := []string{"OPEN"}
 	switch opts.State {
 	case "closed":
-		state = "DECLINED"
+		states = []string{"DECLINED", "SUPERSEDED"}
 	case "merged":
-		state = "MERGED"
+		states = []string{"MERGED"}
 	case "all":
-		state = ""
+		states = []string{"OPEN", "MERGED", "DECLINED", "SUPERSEDED"}
 	}
 
-	url := fmt.Sprintf("%s/repositories/%s/%s/pullrequests?pagelen=%d", bitbucketAPI, owner, repo, perPage)
-	if state != "" {
-		url += "&state=" + state
+	query := url.Values{"state": states}
+	query.Set("pagelen", fmt.Sprint(perPage))
+	if opts.Page > 0 {
+		query.Set("page", fmt.Sprint(opts.Page))
 	}
+	url := fmt.Sprintf("%s/repositories/%s/%s/pullrequests?%s", bitbucketAPI, owner, repo, query.Encode())
 
 	var all []forge.PullRequest
 	for url != "" {

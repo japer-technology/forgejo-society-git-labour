@@ -68,13 +68,13 @@ func Repo(flagRepo, flagForgeType string) (forge forges.Forge, owner, repo, doma
 
 func repoFromFlag(flagRepo, flagForgeType string) (forges.Forge, string, string, string, error) {
 	lastSlash := strings.LastIndex(flagRepo, "/")
-	if lastSlash < 0 {
+	if lastSlash <= 0 || lastSlash == len(flagRepo)-1 {
 		return nil, "", "", "", fmt.Errorf("invalid repo format %q, expected OWNER/REPO", flagRepo)
 	}
 	owner, repo := flagRepo[:lastSlash], flagRepo[lastSlash+1:]
 
 	domain := Domain(flagForgeType)
-	client := newClient(domain)
+	client := newClient(domain, flagForgeType)
 	f, err := forgeForDomainMaybeConfig(context.Background(), client, domain)
 	if err != nil {
 		return nil, "", "", "", err
@@ -82,13 +82,18 @@ func repoFromFlag(flagRepo, flagForgeType string) (forges.Forge, string, string,
 	return f, owner, repo, domain, nil
 }
 
-func repoFromGitRemote(_ string) (forges.Forge, string, string, string, error) {
+func repoFromGitRemote(flagForgeType string) (forges.Forge, string, string, string, error) {
 	domain, owner, repo, err := resolveRemote()
 	if err != nil {
 		return nil, "", "", "", err
 	}
 
-	client := newClient(domain)
+	if hostOverride != "" {
+		domain = hostOverride
+	} else if host := os.Getenv("FORGE_HOST"); host != "" {
+		domain = host
+	}
+	client := newClient(domain, flagForgeType)
 	f, err := forgeForDomainMaybeConfig(context.Background(), client, domain)
 	if err != nil {
 		return nil, "", "", "", err
@@ -133,7 +138,7 @@ func gitRemoteURL(name string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func newClient(domain string) *forges.Client {
+func newClient(domain, flagForgeType string) *forges.Client {
 	token := TokenForDomain(domain)
 	var opts []forges.Option
 	if token != "" {
@@ -142,6 +147,7 @@ func newClient(domain string) *forges.Client {
 
 	// Register default forges first, so config-based registrations override them.
 	hc := HTTPClient()
+	opts = append(opts, forges.WithHTTPClient(hc))
 	defaults := map[string]forges.Forge{
 		"github.com":    ghforge.New(TokenForDomain("github.com"), hc),
 		"gitlab.com":    glforge.New("https://gitlab.com", TokenForDomain("gitlab.com"), hc),
@@ -154,7 +160,10 @@ func newClient(domain string) *forges.Client {
 
 	// If --forge-type was given or the config knows this domain's type,
 	// register it after defaults so it takes precedence and probing is skipped.
-	ft := forgeTypeOverride
+	ft := flagForgeType
+	if ft == "" {
+		ft = forgeTypeOverride
+	}
 	if ft == "" {
 		ft = configForgeType(domain)
 	}
@@ -172,7 +181,12 @@ func forgeForType(forgeType, baseURL, token string, hc *http.Client) forges.Forg
 	case "gitlab":
 		return glforge.New(baseURL, token, hc)
 	case "github":
+		if baseURL == "https://github.com" {
+			return ghforge.New(token, hc)
+		}
 		return ghforge.NewWithBase(baseURL, token, hc)
+	case "bitbucket":
+		return bitbucket.New(token, hc)
 	}
 	return nil
 }
@@ -251,8 +265,50 @@ func TokenForDomainEnv(domain string) string {
 // ForgeForDomain returns a Forge instance for the given domain.
 // If the domain isn't a known forge, it checks config then probes the server.
 func ForgeForDomain(domain string) (forges.Forge, error) {
-	client := newClient(domain)
+	client := newClient(domain, forgeTypeOverride)
 	return forgeForDomainMaybeConfig(context.Background(), client, domain)
+}
+
+// APIBaseURL resolves the API root using the same host configuration as the
+// service clients, rather than guessing the software from its hostname.
+func APIBaseURL(ctx context.Context, domain string) (string, error) {
+	ft := forgeTypeOverride
+	if ft == "" {
+		ft = configForgeType(domain)
+	}
+	if ft == "" {
+		switch domain {
+		case "github.com":
+			ft = "github"
+		case "gitlab.com":
+			ft = "gitlab"
+		case "codeberg.org":
+			ft = "gitea"
+		case "bitbucket.org":
+			ft = "bitbucket"
+		default:
+			detected, err := forges.DetectForgeType(ctx, domain, HTTPClient())
+			if err != nil {
+				return "", err
+			}
+			ft = string(detected)
+		}
+	}
+	switch ft {
+	case "github":
+		if domain == "github.com" {
+			return "https://api.github.com", nil
+		}
+		return "https://" + domain + "/api/v3", nil
+	case "gitlab":
+		return "https://" + domain + "/api/v4", nil
+	case "gitea", "forgejo":
+		return "https://" + domain + "/api/v1", nil
+	case "bitbucket":
+		return "https://api.bitbucket.org/2.0", nil
+	default:
+		return "", fmt.Errorf("unsupported forge type %q", ft)
+	}
 }
 
 // Domain decides which forge host to talk to when the user supplies a bare

@@ -6,9 +6,43 @@ import (
 	forge "github.com/git-pkgs/forge"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 )
 
+func TestBitbucketListPRStatesAndPage(t *testing.T) {
+	for _, tt := range []struct {
+		state string
+		want  []string
+	}{
+		{"", []string{"OPEN"}},
+		{"all", []string{"OPEN", "MERGED", "DECLINED", "SUPERSEDED"}},
+		{"closed", []string{"DECLINED", "SUPERSEDED"}},
+		{"merged", []string{"MERGED"}},
+	} {
+		t.Run(tt.state, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query()["state"]; !slices.Equal(got, tt.want) {
+					t.Errorf("states = %v, want %v", got, tt.want)
+				}
+				if r.URL.Query().Get("page") != "3" {
+					t.Errorf("expected starting page 3, got %s", r.URL.RawQuery)
+				}
+				_, _ = w.Write([]byte(`{"values":[]}`))
+			}))
+			defer srv.Close()
+			old := bitbucketAPI
+			setBitbucketAPI(srv.URL)
+			defer setBitbucketAPI(old)
+			_, err := New("", srv.Client()).PullRequests().List(context.Background(), "owner", "repo", forge.ListPROpts{
+				State: tt.state, Page: 3,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 func TestBitbucketGetPR(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /2.0/repositories/atlassian/stash/pullrequests/1", func(w http.ResponseWriter, r *http.Request) {

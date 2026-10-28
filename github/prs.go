@@ -36,8 +36,9 @@ func convertGitHubPR(pr *github.PullRequest) forge.PullRequest {
 		DiffURL:      pr.GetDiffURL(),
 	}
 
-	if pr.GetMerged() {
+	if pr.GetMerged() || !pr.GetMergedAt().IsZero() {
 		result.State = "merged"
+		result.Merged = true
 	}
 
 	if u := pr.GetUser(); u != nil {
@@ -146,6 +147,8 @@ func (s *gitHubPRService) List(ctx context.Context, owner, repo string, opts for
 	}
 	if ghOpts.State == "" {
 		ghOpts.State = stateOpen
+	} else if ghOpts.State == "merged" {
+		ghOpts.State = stateClosed
 	}
 
 	var all []forge.PullRequest
@@ -158,7 +161,11 @@ func (s *gitHubPRService) List(ctx context.Context, owner, repo string, opts for
 			return nil, err
 		}
 		for _, pr := range prs {
-			all = append(all, convertGitHubPR(pr))
+			result := convertGitHubPR(pr)
+			if opts.State == "merged" && !result.Merged {
+				continue
+			}
+			all = append(all, result)
 		}
 		if resp.NextPage == 0 || (opts.Limit > 0 && len(all) >= opts.Limit) {
 			break
@@ -299,24 +306,40 @@ func (s *gitHubPRService) Merge(ctx context.Context, owner, repo string, number 
 	}
 
 	// Fetch the PR first if we need to delete the branch, since we need the head ref name.
-	var headRef string
+	var headRef, headOwner, headRepo string
 	if opts.Delete {
-		pr, _, err := s.client.PullRequests.Get(ctx, owner, repo, number)
-		if err == nil && pr.GetHead() != nil {
-			headRef = pr.GetHead().GetRef()
+		pr, resp, err := s.client.PullRequests.Get(ctx, owner, repo, number)
+		if err != nil {
+			if resp != nil && resp.StatusCode == http.StatusNotFound {
+				return forge.ErrNotFound
+			}
+			return fmt.Errorf("getting source branch before merge: %w", err)
+		}
+		head := pr.GetHead()
+		headRef = head.GetRef()
+		headOwner = head.GetRepo().GetOwner().GetLogin()
+		headRepo = head.GetRepo().GetName()
+		if headRef == "" || headOwner == "" || headRepo == "" {
+			return fmt.Errorf("cannot determine source repository and branch for deletion")
+		}
+		if headRef == head.GetRepo().GetDefaultBranch() {
+			return fmt.Errorf("refusing to delete the source repository's default branch %q", headRef)
 		}
 	}
 
-	_, resp, err := s.client.PullRequests.Merge(ctx, owner, repo, number, opts.Message, ghOpts)
+	result, resp, err := s.client.PullRequests.Merge(ctx, owner, repo, number, opts.Message, ghOpts)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return forge.ErrNotFound
 		}
 		return err
 	}
+	if !result.GetMerged() {
+		return fmt.Errorf("pull request was not merged: %s", result.GetMessage())
+	}
 
 	if opts.Delete && headRef != "" {
-		if _, err := s.client.Git.DeleteRef(ctx, owner, repo, "heads/"+headRef); err != nil {
+		if _, err := s.client.Git.DeleteRef(ctx, headOwner, headRepo, "heads/"+headRef); err != nil {
 			return fmt.Errorf("merged successfully but failed to delete branch %q: %w", headRef, err)
 		}
 	}

@@ -64,39 +64,36 @@ func detectFromAPI(ctx context.Context, client *http.Client, baseURL string) (Fo
 	}
 
 	// Try GitLab /api/v4/version
-	if ok, err := probeURL(ctx, client, baseURL+"/api/v4/version"); err == nil && ok {
+	var version struct {
+		Version string `json:"version"`
+	}
+	if err := probeJSON(ctx, client, baseURL+"/api/v4/version", &version); err == nil && strings.TrimSpace(version.Version) != "" {
 		return GitLab, nil
 	}
 
 	// Try GitHub Enterprise /api/v3/meta
-	if ok, err := probeURL(ctx, client, baseURL+"/api/v3/meta"); err == nil && ok {
+	var meta struct {
+		VerifiablePasswordAuthentication *bool `json:"verifiable_password_authentication"`
+	}
+	if err := probeJSON(ctx, client, baseURL+"/api/v3/meta", &meta); err == nil && meta.VerifiablePasswordAuthentication != nil {
 		return GitHub, nil
 	}
 
+	if err := ctx.Err(); err != nil {
+		return Unknown, err
+	}
 	return Unknown, fmt.Errorf("could not detect forge type for %s", baseURL)
 }
 
 func probeGiteaAPI(ctx context.Context, client *http.Client, baseURL string) (ForgeType, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/v1/version", nil)
-	if err != nil {
-		return Unknown, err
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return Unknown, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return Unknown, fmt.Errorf("status %d", resp.StatusCode)
-	}
-
 	var v struct {
 		Version string `json:"version"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+	if err := probeJSON(ctx, client, baseURL+"/api/v1/version", &v); err != nil {
 		return Unknown, err
+	}
+	if strings.TrimSpace(v.Version) == "" {
+		return Unknown, fmt.Errorf("missing version in Gitea API response")
 	}
 
 	if strings.Contains(strings.ToLower(v.Version), "forgejo") {
@@ -105,17 +102,20 @@ func probeGiteaAPI(ctx context.Context, client *http.Client, baseURL string) (Fo
 	return Gitea, nil
 }
 
-func probeURL(ctx context.Context, client *http.Client, url string) (bool, error) {
+func probeJSON(ctx context.Context, client *http.Client, url string, result any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	return resp.StatusCode == http.StatusOK, nil
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return json.NewDecoder(resp.Body).Decode(result)
 }

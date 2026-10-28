@@ -135,7 +135,7 @@ func (s *giteaPRService) List(ctx context.Context, owner, repo string, opts forg
 	switch opts.State {
 	case stateOpen:
 		gOpts.State = gitea.StateOpen
-	case stateClosed:
+	case stateClosed, "merged":
 		gOpts.State = gitea.StateClosed
 	case stateAll:
 		gOpts.State = gitea.StateAll
@@ -157,6 +157,9 @@ func (s *giteaPRService) List(ctx context.Context, owner, repo string, opts forg
 			return nil, err
 		}
 		for _, pr := range prs {
+			if opts.State == "merged" && !pr.HasMerged {
+				continue
+			}
 			all = append(all, convertGiteaPR(pr))
 		}
 		if lastPage(resp, len(prs), perPage) || (opts.Limit > 0 && len(all) >= opts.Limit) {
@@ -280,12 +283,15 @@ func (s *giteaPRService) Merge(ctx context.Context, owner, repo string, number i
 		gOpts.DeleteBranchAfterMerge = gitea.OptionalBool(true)
 	}
 
-	_, resp, err := s.client.MergePullRequest(owner, repo, int64(number), gOpts)
+	merged, resp, err := s.client.MergePullRequest(owner, repo, int64(number), gOpts)
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
 			return forge.ErrNotFound
 		}
 		return err
+	}
+	if !merged {
+		return fmt.Errorf("pull request was not merged")
 	}
 	return nil
 }

@@ -1,6 +1,10 @@
 package resolve
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +13,104 @@ import (
 
 	"github.com/git-pkgs/forge/internal/config"
 )
+
+type routeTransport func(*http.Request) (*http.Response, error)
+
+func (f routeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRepoHostOverridesRemote(t *testing.T) {
+	config.ResetCache()
+	t.Cleanup(config.ResetCache)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	mustGit(t, "init", "-q")
+	mustGit(t, "remote", "add", "origin", "https://github.com/group/project.git")
+	oldHost := hostOverride
+	t.Cleanup(func() { hostOverride = oldHost })
+
+	for _, tt := range []struct {
+		flag, env, want string
+	}{
+		{"", "env.example", "env.example"},
+		{"flag.example", "env.example", "flag.example"},
+		{"", "", "github.com"},
+	} {
+		hostOverride = tt.flag
+		t.Setenv("FORGE_HOST", tt.env)
+		_, owner, repo, domain, err := Repo("", "github")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if domain != tt.want || owner != "group" || repo != "project" {
+			t.Fatalf("resolved %s/%s/%s, want %s/group/project", domain, owner, repo, tt.want)
+		}
+	}
+}
+
+func TestRepoRejectsEmptyOwnerOrName(t *testing.T) {
+	for _, repo := range []string{"owner", "/repo", "owner/"} {
+		if _, _, _, _, err := Repo(repo, "github"); err == nil {
+			t.Errorf("expected invalid repo error for %q", repo)
+		}
+	}
+}
+
+func TestForcedGitHubUsesPublicAPI(t *testing.T) {
+	config.ResetCache()
+	t.Cleanup(config.ResetCache)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	old := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = old })
+	http.DefaultTransport = routeTransport(func(r *http.Request) (*http.Response, error) {
+		if got := r.URL.String(); got != "https://api.github.com/repos/owner/repo" {
+			return nil, fmt.Errorf("wrong API URL: %s", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"name":"repo"}`)),
+		}, nil
+	})
+	client := newClient("github.com", "github")
+	f, err := client.ForgeFor("github.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Repos().Get(context.Background(), "owner", "repo"); err != nil {
+		t.Fatal(err)
+	}
+	if client.HTTPClient() == nil {
+		t.Fatal("auto-detection must use the configured HTTP client")
+	}
+}
+
+func TestAPIBaseURL(t *testing.T) {
+	config.ResetCache()
+	t.Cleanup(config.ResetCache)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	old := forgeTypeOverride
+	t.Cleanup(func() { forgeTypeOverride = old })
+	for _, tt := range []struct {
+		domain, forgeType, want string
+	}{
+		{"github.com", "", "https://api.github.com"},
+		{"github.com", "github", "https://api.github.com"},
+		{"gitlab.com", "", "https://gitlab.com/api/v4"},
+		{"codeberg.org", "", "https://codeberg.org/api/v1"},
+		{"bitbucket.org", "", "https://api.bitbucket.org/2.0"},
+		{"code.example", "github", "https://code.example/api/v3"},
+		{"code.example", "gitlab", "https://code.example/api/v4"},
+		{"github.example", "forgejo", "https://github.example/api/v1"},
+	} {
+		t.Run(tt.domain+"/"+tt.forgeType, func(t *testing.T) {
+			forgeTypeOverride = tt.forgeType
+			got, err := APIBaseURL(context.Background(), tt.domain)
+			if err != nil || got != tt.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
 
 func TestMapSSHHost(t *testing.T) {
 	config.ResetCache()
@@ -56,6 +158,12 @@ func TestMapSSHHostNoConfig(t *testing.T) {
 }
 
 func TestTokenForDomain(t *testing.T) {
+	config.ResetCache()
+	t.Cleanup(config.ResetCache)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, name := range []string{"FORGE_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN", "GLAB_TOKEN"} {
+		t.Setenv(name, "")
+	}
 	// With no env vars set, should return empty
 	got := TokenForDomain("example.com")
 	if got != "" {
@@ -105,6 +213,8 @@ func TestTokenForDomainEnvSpecificOverridesFallback(t *testing.T) {
 }
 
 func TestTokenForDomainEnvFallbackToForgeToken(t *testing.T) {
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
 	t.Setenv("FORGE_TOKEN", "forge-fallback")
 
 	got := TokenForDomainEnv("github.com")
